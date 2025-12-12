@@ -184,8 +184,8 @@ async function upsertCompetencyRaw(
 
   const insertSql = `
     INSERT INTO prf_lxp_competency_description
-      (type, title, description, lang)
-    VALUES (?, ?, ?, ?)
+      (type, title, description, lang, created_at, updated_at)
+    VALUES (?, ?, ?, ?, NOW(), NOW())
   `;
   const insertParams = [typeValue, titleNorm, descNorm, lang];
   const result: any = await qr.query(insertSql, insertParams);
