@@ -15,7 +15,7 @@ dotenv.config();
 type LangCode = "ID" | "EN";
 
 const MAX_TITLE_LEN = 150;
-const MAX_DESC_LEN = 10_000;
+const MAX_DESC_LEN = 10000;
 
 const LEVELS: EProficiencyLevel[] = [
   EProficiencyLevel.BASIC,
@@ -40,21 +40,26 @@ function detectLangFromSheet(sheetName: string, fallback?: LangCode): LangCode {
   return fallback || "ID";
 }
 
-function normStr(v: unknown): string {
-  if (v == null) return "";
+/** Return string (trimmed) or null for empty cells */
+function cellToStringOrNull(v: unknown): string | null {
+  if (v == null) return null;
   if (typeof v === "object") {
     const maybeText = (v as any).text ?? (v as any).toString?.() ?? "";
-    return String(maybeText).trim();
+    const s = String(maybeText).trim();
+    return s.length ? s : null;
   }
-  return String(v).trim();
+  const s = String(v).trim();
+  return s.length ? s : null;
 }
 
-function ensureLen(
+/** Enforce max length but preserve nulls */
+function ensureLenNullable(
   label: string,
-  s: string,
+  s: string | null,
   max: number,
   truncate: boolean
-): string {
+): string | null {
+  if (s == null) return null;
   if (s.length <= max) return s;
   const msg = `${label} length ${s.length} exceeds ${max}`;
   if (truncate) {
@@ -67,15 +72,15 @@ function ensureLen(
 function mapLevelHeader(h: string): EProficiencyLevel | null {
   const key = h.trim().toLowerCase();
   switch (key) {
-    case "Basic":
+    case "basic":
       return EProficiencyLevel.BASIC;
-    case "Intermediate":
+    case "intermediate":
       return EProficiencyLevel.INTERMEDIATE;
-    case "Proficient":
+    case "proficient":
       return EProficiencyLevel.PROFICIENT;
-    case "Advanced":
+    case "advanced":
       return EProficiencyLevel.ADVANCED;
-    case "Master":
+    case "master":
       return EProficiencyLevel.MASTER;
     default:
       return null;
@@ -92,38 +97,69 @@ function toType(val?: string): ELxpType | undefined {
 }
 
 /**
- * Read a worksheet as array of objects using the first non-empty row as headers.
- * Uses row.eachCell(...) to avoid sparse/undefined Row.values.
+ * Build a header map by merging two header rows:
+ * - Row-1: "Competency", "Definition", "Key Behavior"
+ * - Row-2: "Basic", "Intermediate", "Proficient", "Advanced", "Master"
+ * Any column whose Row-1 header is "Key Behavior" (or blank) is replaced by Row-2 header.
+ * (Matches your final script’s approach. ) [1](https://365tsel-my.sharepoint.com/personal/handoko_d_wicaksono_telkomsel_co_id/Documents/Microsoft%20Copilot%20Chat%20Files/final-script.txt)
  */
-function rowsFromWorksheet(ws: Worksheet): Array<Record<string, any>> {
-  const out: Array<Record<string, any>> = [];
+function buildHeaderMap(ws: Worksheet): {
+  headerRowIdx: number;
+  headerMap: Record<number, string>;
+} {
   let headerRowIdx = -1;
   const headerMap: Record<number, string> = {};
 
-  // 1) Find first non-empty row and treat as headers
+  // Find first non-empty row as header row-1
   for (let r = 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
     let hasCells = false;
-    const localHeaders: Record<number, string> = {};
-
-    row.eachCell((cell, col) => {
-      const s = normStr(cell.value);
-      if (s) {
-        hasCells = true;
-        localHeaders[col] = s;
-      }
+    row.eachCell((cell) => {
+      const s = cellToStringOrNull(cell.value);
+      if (s) hasCells = true;
     });
-
     if (hasCells) {
       headerRowIdx = r;
-      Object.assign(headerMap, localHeaders);
       break;
     }
   }
+  if (headerRowIdx < 0) return { headerRowIdx, headerMap };
 
-  if (headerRowIdx < 0) return out;
+  // Fill headerMap from row-1
+  const headerRow = ws.getRow(headerRowIdx);
+  headerRow.eachCell((cell, col) => {
+    const s = cellToStringOrNull(cell.value);
+    if (s) headerMap[col] = s;
+  });
 
-  // 2) Process data rows, data starts at 3rd row
+  // Merge with row-2 (if exists)
+  const secondHeaderRow = ws.getRow(headerRowIdx + 1);
+  if (secondHeaderRow && secondHeaderRow.cellCount > 0) {
+    secondHeaderRow.eachCell((cell, col) => {
+      const s2 = cellToStringOrNull(cell.value);
+      const s1 = headerMap[col] ?? "";
+      if (s2 && (!s1 || s1.toLowerCase() === "key behavior")) {
+        headerMap[col] = s2;
+      }
+    });
+  }
+
+  return { headerRowIdx, headerMap };
+}
+
+/**
+ * Read a worksheet to array of objects, using merged headerMap.
+ * Data starts at (headerRowIdx + 2) to skip the two header rows
+ * (as in your leadership workbook). [2](https://365tsel-my.sharepoint.com/personal/handoko_d_wicaksono_telkomsel_co_id/Documents/Microsoft%20Copilot%20Chat%20Files/testCompLeadershipData.xlsx)
+ */
+function rowsFromWorksheet(ws: Worksheet): {
+  rows: Array<Record<string, any>>;
+  headerMap: Record<number, string>;
+} {
+  const { headerRowIdx, headerMap } = buildHeaderMap(ws);
+  const out: Array<Record<string, any>> = [];
+  if (headerRowIdx < 0) return { rows: out, headerMap };
+
   for (let r = headerRowIdx + 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
     let isEmpty = true;
@@ -132,65 +168,59 @@ function rowsFromWorksheet(ws: Worksheet): Array<Record<string, any>> {
     row.eachCell((cell, col) => {
       const header = headerMap[col];
       if (!header) return;
-      const s = normStr(cell.value);
-      obj[header] = s;
-      if (s) isEmpty = false;
+      const val = cellToStringOrNull(cell.value);
+      obj[header] = val;
+      if (val != null) isEmpty = false;
     });
 
     if (!isEmpty) out.push(obj);
   }
 
-  return out;
+  return { rows: out, headerMap };
 }
 
 /**
- * Upsert parent row (prf_lxp_competency_description) using raw SQL:
- * - Lookup by (title, description, lang) to avoid cross-language collisions.
- * - If exists: UPDATE fields + updated_at.
- * - If not: INSERT with timestamps.
- * Returns the parent id.
+ * Upsert parent row using null-safe equality (<=>) so NULL title/description still match.
  */
 async function upsertCompetencyRaw(
   qr: QueryRunner,
   lang: LangCode,
-  titleNorm: string,
-  descNorm: string,
+  titleVal: string | null,
+  descVal: string | null,
   effectiveType: ELxpType | undefined
 ): Promise<number> {
   const selectSql = `
     SELECT id
     FROM prf_lxp_competency_description
-    WHERE title = ? AND description = ? AND lang = ?
+    WHERE title <=> ? AND lang = ?
     LIMIT 1
   `;
-  const selectParams = [titleNorm, descNorm, lang];
+  const selectParams = [titleVal, lang];
   const rows = (await qr.query(selectSql, selectParams)) as Array<{
     id: number;
   }>;
-
-  const typeValue = effectiveType ?? null; // pass NULL if type is undefined
+  console.log("selected title : ", titleVal);
+  console.log(rows);
+  const typeValue = effectiveType ?? null;
 
   if (rows.length > 0) {
     const id = rows[0].id;
     const updateSql = `
       UPDATE prf_lxp_competency_description
-      SET type = ?, lang = ?, description = ?, updated_at = NOW()
+      SET type = ?, lang = ?, description = ?
       WHERE id = ?
     `;
-    const updateParams = [typeValue, lang, descNorm, id];
+    const updateParams = [typeValue, lang, descVal, id];
     await qr.query(updateSql, updateParams);
     return id;
   }
-
   const insertSql = `
     INSERT INTO prf_lxp_competency_description
       (type, title, description, lang)
     VALUES (?, ?, ?, ?)
   `;
-  const insertParams = [typeValue, titleNorm, descNorm, lang];
+  const insertParams = [typeValue, titleVal, descVal, lang];
   const result: any = await qr.query(insertSql, insertParams);
-  console.log("inserted operations on competency description : ");
-  console.log(result);
   const newId = result?.insertId;
   if (newId) return newId;
 
@@ -204,20 +234,17 @@ async function upsertCompetencyRaw(
 }
 
 /**
- * Upsert behavior rows (prf_lxp_competency_behavior) using raw SQL:
- * - Per level: lookup by (competency_id, level, lang).
- * - If exists: UPDATE behavior_desc, level_order, updated_at.
- * - If not exists: INSERT row with created_at/updated_at.
+ * Upsert behaviors — always write a row per level, even if behavior_desc is NULL.
  */
 async function upsertBehaviorsRaw(
   qr: QueryRunner,
   compId: number,
   lang: LangCode,
-  behaviorsByLevel: Partial<Record<EProficiencyLevel, string>>
+  behaviorsByLevel: Partial<Record<EProficiencyLevel, string | null>>
 ): Promise<void> {
   for (const level of LEVELS) {
-    const text = normStr(behaviorsByLevel[level]);
-    if (!text) continue;
+    const val = behaviorsByLevel[level] ?? null; // preserve null
+    const text = val === null ? null : val; // already normalized
 
     const selectSql = `
       SELECT id
@@ -234,7 +261,7 @@ async function upsertBehaviorsRaw(
       const id = rows[0].id;
       const updateSql = `
         UPDATE prf_lxp_competency_behavior
-        SET behavior_desc = ?, level_order = ?, updated_at = NOW()
+        SET behavior_desc = ?, level_order = ?
         WHERE id = ?
       `;
       const updateParams = [text, LEVEL_ORDER[level], id];
@@ -242,8 +269,8 @@ async function upsertBehaviorsRaw(
     } else {
       const insertSql = `
         INSERT INTO prf_lxp_competency_behavior
-          (competency_id, level, behavior_desc, lang, level_order, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+          (competency_id, level, behavior_desc, lang, level_order)
+        VALUES (?, ?, ?, ?, ?)
       `;
       const insertParams = [compId, level, text, lang, LEVEL_ORDER[level]];
       await qr.query(insertSql, insertParams);
@@ -305,48 +332,42 @@ async function run() {
       const lang = explicitLang || detectLangFromSheet(sheetName);
       console.log(`Processing sheet '${sheetName}' → lang=${lang}`);
 
-      const rows = rowsFromWorksheet(ws);
-
-      const headers = rows.length ? Object.keys(rows[0]) : [];
-      const findHeader = (name: string) =>
-        headers.find((h) => h.trim().toLowerCase() === name.toLowerCase());
-
-      const hCompetency = findHeader("Competency") || "Competency";
-      const hDefinition = findHeader("Definition") || "Definition";
+      const { rows, headerMap } = rowsFromWorksheet(ws);
+      const resolvedHeaders = Object.values(headerMap);
+      const headersLower = resolvedHeaders.map((h) => h.toLowerCase());
+      const hCompetency =
+        resolvedHeaders[headersLower.indexOf("competency")] ?? "Competency";
+      const hDefinition =
+        resolvedHeaders[headersLower.indexOf("definition")] ?? "Definition";
 
       const levelHeaders: { header: string; level: EProficiencyLevel }[] = [];
-      for (const h of headers) {
+      for (const h of resolvedHeaders) {
         const lvl = mapLevelHeader(h);
         if (lvl) levelHeaders.push({ header: h, level: lvl });
       }
-      if (levelHeaders.length === 0) {
-        console.warn(
-          `[WARN] No level headers found in '${sheetName}'. Expected: Basic, Intermediate, Proficient, Advanced, Master.`
-        );
-      }
 
-      // ⬇️ One transaction per Excel row
+      // One transaction per Excel row
       for (const [idx, row] of rows.entries()) {
-        const titleRaw = normStr(row[hCompetency]);
-        const defRaw = normStr(row[hDefinition]);
-        if (!titleRaw && !defRaw) continue;
+        const titleRaw = cellToStringOrNull(row[hCompetency]);
+        const defRaw = cellToStringOrNull(row[hDefinition]);
+        if (titleRaw == null && defRaw == null) continue;
 
-        const titleNorm = ensureLen(
+        const titleNorm = ensureLenNullable(
           "title",
           titleRaw,
           MAX_TITLE_LEN,
           truncateFlag
         );
-        const descNorm = ensureLen(
+        const descNorm = ensureLenNullable(
           "description",
           defRaw,
           MAX_DESC_LEN,
           truncateFlag
         );
 
-        const behaviors: Partial<Record<EProficiencyLevel, string>> = {};
+        const behaviors: Partial<Record<EProficiencyLevel, string | null>> = {};
         for (const { header, level } of levelHeaders) {
-          behaviors[level] = normStr(row[header]);
+          behaviors[level] = cellToStringOrNull(row[header]);
         }
 
         const effectiveType =
@@ -358,7 +379,6 @@ async function run() {
         try {
           await qr.startTransaction();
 
-          // Parent upsert (title+description+lang)
           const compId = await upsertCompetencyRaw(
             qr,
             lang,
@@ -366,18 +386,20 @@ async function run() {
             descNorm,
             effectiveType
           );
-
-          // Children upsert per level
           await upsertBehaviorsRaw(qr, compId, lang, behaviors);
 
           await qr.commitTransaction();
           console.log(
-            `  [${sheetName}] Row ${idx + 1} committed: ${titleNorm}`
+            `  [${sheetName}] Row ${idx + 1} committed: ${
+              titleNorm ?? "(NULL title)"
+            }`
           );
         } catch (e) {
           await qr.rollbackTransaction();
           console.error(
-            `  [${sheetName}] Row ${idx + 1} rolled back: ${titleNorm}`
+            `  [${sheetName}] Row ${idx + 1} rolled back: ${
+              titleNorm ?? "(NULL title)"
+            }`
           );
           console.error(e);
         } finally {
