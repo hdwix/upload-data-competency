@@ -88,12 +88,11 @@ function mapLevelHeader(h: string): EProficiencyLevel | null {
 }
 
 /** Return ELxpType or undefined (never null) */
-function toType(val?: string): ELxpType | undefined {
+function toType(val?: string | null) {
   if (!val) return undefined;
   const v = val.toLowerCase();
   if (v === "technical") return ELxpType.TECHNICAL;
   if (v === "leadership") return ELxpType.LEADERSHIP;
-  return undefined;
 }
 
 /**
@@ -240,7 +239,8 @@ async function upsertBehaviorsRaw(
   qr: QueryRunner,
   compId: number,
   lang: LangCode,
-  behaviorsByLevel: Partial<Record<EProficiencyLevel, string | null>>
+  behaviorsByLevel: Partial<Record<EProficiencyLevel, string | null>>,
+  effectiveType: ELxpType
 ): Promise<void> {
   for (const level of LEVELS) {
     const val = behaviorsByLevel[level] ?? null; // preserve null
@@ -248,11 +248,11 @@ async function upsertBehaviorsRaw(
 
     const selectSql = `
       SELECT id
-      FROM prf_lxp_competency_behavior
-      WHERE competency_id = ? AND level = ? AND lang = ?
+      FROM prf_competency_catalog_rating
+      WHERE competency_id = ? AND title = ? AND lang = ? AND status = 'active' AND detail_category = ?
       LIMIT 1
     `;
-    const selectParams = [compId, level, lang];
+    const selectParams = [compId, level, lang, effectiveType];
     const rows = (await qr.query(selectSql, selectParams)) as Array<{
       id: number;
     }>;
@@ -260,19 +260,27 @@ async function upsertBehaviorsRaw(
     if (rows.length > 0) {
       const id = rows[0].id;
       const updateSql = `
-        UPDATE prf_lxp_competency_behavior
-        SET behavior_desc = ?, level_order = ?
+        UPDATE prf_competency_catalog_rating
+        SET description = ?, scala = ?
         WHERE id = ?
       `;
       const updateParams = [text, LEVEL_ORDER[level], id];
       await qr.query(updateSql, updateParams);
     } else {
       const insertSql = `
-        INSERT INTO prf_lxp_competency_behavior
-          (competency_id, level, behavior_desc, lang, level_order)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO prf_competency_catalog_rating
+          (competency_id, category, detail_category, title, description, lang, scala)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `;
-      const insertParams = [compId, level, text, lang, LEVEL_ORDER[level]];
+      const insertParams = [
+        compId,
+        "ca",
+        effectiveType,
+        level,
+        text,
+        lang,
+        LEVEL_ORDER[level],
+      ];
       await qr.query(insertSql, insertParams);
     }
   }
@@ -299,6 +307,14 @@ async function run() {
   const explicitLang = langArg
     ? (langArg.split("=")[1].toUpperCase() as LangCode)
     : undefined;
+  const effectiveType =
+    explicitType ?? toType(process.env.DEFAULT_LXP_TYPE || undefined);
+  if (!effectiveType) {
+    console.error(
+      "LXP type is required. Provide --type=technical|leadership or set DEFAULT_LXP_TYPE."
+    );
+    process.exit(1);
+  }
 
   const filePath = path.resolve(fileArg);
   if (!fs.existsSync(filePath)) {
@@ -370,9 +386,6 @@ async function run() {
           behaviors[level] = cellToStringOrNull(row[header]);
         }
 
-        const effectiveType =
-          explicitType ?? toType(process.env.DEFAULT_LXP_TYPE || "");
-
         const qr: QueryRunner = AppDataSource.createQueryRunner();
         await qr.connect();
 
@@ -386,7 +399,7 @@ async function run() {
             descNorm,
             effectiveType
           );
-          await upsertBehaviorsRaw(qr, compId, lang, behaviors);
+          await upsertBehaviorsRaw(qr, compId, lang, behaviors, effectiveType);
 
           await qr.commitTransaction();
           console.log(
