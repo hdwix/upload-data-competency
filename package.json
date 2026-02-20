@@ -9,6 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/import-competency-exceljs.js",
+    "import:dummy-technical": "ts-node src/import-competency-exceljs.ts \"./TestDataTechnical.xlsx\" --type=technical",
+    "import:dummy-leadership": "ts-node src/import-competency-exceljs.ts \"./testCompLeadershipData.xlsx\" --type=leadership",
     "import:technical": "ts-node src/import-competency-exceljs.ts \"./technical-competency-final.xlsx\" --type=technical",
     "import:leadership": "ts-node src/import-competency-exceljs.ts \"./leadership-competency-final.xlsx\" --type=leadership",
     "import:ind": "ts-node src/import-competency-exceljs.ts \"./Summary Key Behavior_Technical Competency (IND & ENG).xlsx\" --sheet=IND --type=technical --truncate"
