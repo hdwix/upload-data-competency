@@ -13,6 +13,8 @@
     "import:dummy-leadership": "ts-node src/import-competency-exceljs.ts \"./testCompLeadershipData.xlsx\" --type=leadership",
     "import:technical": "ts-node src/import-competency-exceljs.ts \"./technical-competency-final.xlsx\" --type=technical",
     "import:leadership": "ts-node src/import-competency-exceljs.ts \"./leadership-competency-final.xlsx\" --type=leadership",
+    "import:new-technical": "ts-node src/import-competency-exceljs.ts \"./new-technical-competency-final.xlsx\" --type=technical",
+    "import:new-leadership": "ts-node src/import-competency-exceljs.ts \"./new-leadership-competency-final.xlsx\" --type=leadership",
     "import:ind": "ts-node src/import-competency-exceljs.ts \"./Summary Key Behavior_Technical Competency (IND & ENG).xlsx\" --sheet=IND --type=technical --truncate"
   },
   "dependencies": {
