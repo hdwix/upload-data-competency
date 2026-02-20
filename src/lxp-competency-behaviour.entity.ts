@@ -9,6 +9,7 @@ import {
 } from "typeorm";
 
 export enum EProficiencyLevel {
+  NA = "NA",
   BASIC = "Basic",
   INTERMEDIATE = "Intermediate",
   PROFICIENT = "Proficient",

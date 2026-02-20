@@ -18,6 +18,7 @@ const MAX_TITLE_LEN = 150;
 const MAX_DESC_LEN = 10000;
 
 const LEVELS: EProficiencyLevel[] = [
+  EProficiencyLevel.NA,
   EProficiencyLevel.BASIC,
   EProficiencyLevel.INTERMEDIATE,
   EProficiencyLevel.PROFICIENT,
@@ -26,6 +27,7 @@ const LEVELS: EProficiencyLevel[] = [
 ];
 
 const LEVEL_ORDER: Record<EProficiencyLevel, number> = {
+  [EProficiencyLevel.NA]: 0,
   [EProficiencyLevel.BASIC]: 1,
   [EProficiencyLevel.INTERMEDIATE]: 2,
   [EProficiencyLevel.PROFICIENT]: 3,
@@ -57,7 +59,7 @@ function ensureLenNullable(
   label: string,
   s: string | null,
   max: number,
-  truncate: boolean
+  truncate: boolean,
 ): string | null {
   if (s == null) return null;
   if (s.length <= max) return s;
@@ -72,15 +74,25 @@ function ensureLenNullable(
 function mapLevelHeader(h: string): EProficiencyLevel | null {
   const key = h.trim().toLowerCase();
   switch (key) {
+    case "na":
+    case "n/a":
+      return EProficiencyLevel.NA;
     case "basic":
+    case "level 1":
       return EProficiencyLevel.BASIC;
     case "intermediate":
+    case "level 2":
       return EProficiencyLevel.INTERMEDIATE;
     case "proficient":
+    case "level 3":
       return EProficiencyLevel.PROFICIENT;
     case "advanced":
+    case "level 4":
       return EProficiencyLevel.ADVANCED;
     case "master":
+    case "level 5":
+    case "level 5/6":
+    case "level 6":
       return EProficiencyLevel.MASTER;
     default:
       return null;
@@ -186,7 +198,7 @@ async function upsertCompetencyRaw(
   lang: LangCode,
   titleVal: string | null,
   descVal: string | null,
-  effectiveType: ELxpType | undefined
+  effectiveType: ELxpType | undefined,
 ): Promise<number> {
   const selectSql = `
     SELECT id
@@ -234,25 +246,25 @@ async function upsertCompetencyRaw(
 
 /**
  * Upsert behaviors — always write a row per level, even if behavior_desc is NULL.
+ * Target table: prf_lxp_competency_behavior
  */
 async function upsertBehaviorsRaw(
   qr: QueryRunner,
   compId: number,
   lang: LangCode,
   behaviorsByLevel: Partial<Record<EProficiencyLevel, string | null>>,
-  effectiveType: ELxpType
 ): Promise<void> {
   for (const level of LEVELS) {
-    const val = behaviorsByLevel[level] ?? null; // preserve null
-    const text = val === null ? null : val; // already normalized
+    const val = behaviorsByLevel[level] ?? null;
+    const text = val === null ? null : val;
 
     const selectSql = `
       SELECT id
-      FROM prf_competency_catalog_rating
-      WHERE competency_id = ? AND title = ? AND lang = ? AND status = 'active' AND detail_category = ?
+      FROM prf_lxp_competency_behavior
+      WHERE competency_id = ? AND level = ? AND lang = ?
       LIMIT 1
     `;
-    const selectParams = [compId, level, lang, effectiveType];
+    const selectParams = [compId, level, lang];
     const rows = (await qr.query(selectSql, selectParams)) as Array<{
       id: number;
     }>;
@@ -260,22 +272,20 @@ async function upsertBehaviorsRaw(
     if (rows.length > 0) {
       const id = rows[0].id;
       const updateSql = `
-        UPDATE prf_competency_catalog_rating
-        SET description = ?, scala = ?
+        UPDATE prf_lxp_competency_behavior
+        SET behavior_desc = ?, level_order = ?
         WHERE id = ?
       `;
       const updateParams = [text, LEVEL_ORDER[level], id];
       await qr.query(updateSql, updateParams);
     } else {
       const insertSql = `
-        INSERT INTO prf_competency_catalog_rating
-          (competency_id, category, detail_category, title, description, lang, scala)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO prf_lxp_competency_behavior
+          (competency_id, level, behavior_desc, lang, level_order)
+        VALUES (?, ?, ?, ?, ?)
       `;
       const insertParams = [
         compId,
-        "ca",
-        effectiveType,
         level,
         text,
         lang,
@@ -288,7 +298,7 @@ async function upsertBehaviorsRaw(
 
 async function run() {
   const fileArg = process.argv.find(
-    (a) => a.endsWith(".xlsx") || a.endsWith(".xlsm")
+    (a) => a.endsWith(".xlsx") || a.endsWith(".xlsm"),
   );
   const sheetArg = process.argv.find((a) => a.startsWith("--sheet="));
   const typeArg = process.argv.find((a) => a.startsWith("--type="));
@@ -297,7 +307,7 @@ async function run() {
 
   if (!fileArg) {
     console.error(
-      "Usage: ts-node src/import-competency-exceljs.ts <file.xlsx> [--sheet=IND] [--type=technical|leadership] [--lang=ID|EN] [--truncate]"
+      "Usage: ts-node src/import-competency-exceljs.ts <file.xlsx> [--sheet=IND] [--type=technical|leadership] [--lang=ID|EN] [--truncate]",
     );
     process.exit(1);
   }
@@ -311,7 +321,7 @@ async function run() {
     explicitType ?? toType(process.env.DEFAULT_LXP_TYPE || undefined);
   if (!effectiveType) {
     console.error(
-      "LXP type is required. Provide --type=technical|leadership or set DEFAULT_LXP_TYPE."
+      "LXP type is required. Provide --type=technical|leadership or set DEFAULT_LXP_TYPE.",
     );
     process.exit(1);
   }
@@ -351,10 +361,13 @@ async function run() {
       const { rows, headerMap } = rowsFromWorksheet(ws);
       const resolvedHeaders = Object.values(headerMap);
       const headersLower = resolvedHeaders.map((h) => h.toLowerCase());
-      const hCompetency =
-        resolvedHeaders[headersLower.indexOf("competency")] ?? "Competency";
-      const hDefinition =
-        resolvedHeaders[headersLower.indexOf("definition")] ?? "Definition";
+      
+      // Support both English and Indonesian header names
+      const competencyIdx = headersLower.findIndex(h => h === "competency" || h === "kompetensi");
+      const definitionIdx = headersLower.findIndex(h => h === "definition" || h === "definisi");
+      
+      const hCompetency = competencyIdx >= 0 ? resolvedHeaders[competencyIdx] : "Competency";
+      const hDefinition = definitionIdx >= 0 ? resolvedHeaders[definitionIdx] : "Definition";
 
       const levelHeaders: { header: string; level: EProficiencyLevel }[] = [];
       for (const h of resolvedHeaders) {
@@ -372,13 +385,13 @@ async function run() {
           "title",
           titleRaw,
           MAX_TITLE_LEN,
-          truncateFlag
+          truncateFlag,
         );
         const descNorm = ensureLenNullable(
           "description",
           defRaw,
           MAX_DESC_LEN,
-          truncateFlag
+          truncateFlag,
         );
 
         const behaviors: Partial<Record<EProficiencyLevel, string | null>> = {};
@@ -397,22 +410,22 @@ async function run() {
             lang,
             titleNorm,
             descNorm,
-            effectiveType
+            effectiveType,
           );
-          await upsertBehaviorsRaw(qr, compId, lang, behaviors, effectiveType);
+          await upsertBehaviorsRaw(qr, compId, lang, behaviors);
 
           await qr.commitTransaction();
           console.log(
             `  [${sheetName}] Row ${idx + 1} committed: ${
               titleNorm ?? "(NULL title)"
-            }`
+            }`,
           );
         } catch (e) {
           await qr.rollbackTransaction();
           console.error(
             `  [${sheetName}] Row ${idx + 1} rolled back: ${
               titleNorm ?? "(NULL title)"
-            }`
+            }`,
           );
           console.error(e);
         } finally {
